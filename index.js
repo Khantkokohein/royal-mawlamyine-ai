@@ -1,6 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const { GoogleGenAI } = require("@google/genai");
+const admin = require("firebase-admin");
 
 const app = express();
 app.use(express.json());
@@ -12,7 +13,20 @@ const PORT = process.env.PORT || 3000;
 
 const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 
-// temporary in-memory state
+// Firebase Admin / Firestore
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n")
+    })
+  });
+}
+
+const db = admin.firestore();
+
+// temporary in-memory user state
 const userStates = new Map();
 
 const HOTEL = {
@@ -33,7 +47,7 @@ const HOTEL = {
     "Children age 6 to 12 years - 25000MMK",
   locationText:
     "Royal Mawlamyine Hotel ၏ လိပ်စာနှင့် တည်နေရာအချက်အလက်ကို ပို့ပေးနိုင်ပါတယ်ရှင်/ခင်ဗျာ。\n" +
-    "မိတ်ဆွေ ဘယ်နေရာကနေ လာမလဲဆိုတာ ပြောပေးပါက ဘယ်လိုလာရမလဲဆိုသည့် လမ်းညွှန်အချက်အလက်ကိုလည်း ဆက်လက်ကူညီပေးနိုင်ပါသည်။"
+    "မိတ်ဆွေ ဘယ်နေရာကနေ လာမလဲဆိုတာ ပြောပေးပါက ဘယ်လိုလာရမလဲဆိုသည့် လမ်းညွှန်အချက်အလက်ကိုလည်း ဆက်လက်ကူညီပေးနိုင်ပါသည်。"
 };
 
 const SYSTEM_PROMPT = `
@@ -42,16 +56,17 @@ You are the polite assistant for Royal Mawlamyine Hotel.
 Rules:
 - Reply in polite Burmese by default.
 - Use short English only when useful.
-- Never invent prices, hotel policies, facilities, or addresses.
-- If the message is unclear and there is no clear context, ask for clarification politely.
-- Do not output prices unless they are already handled by fixed business logic outside AI.
-- Be concise and professional.
+- Never invent prices, policies, facilities, or address details.
+- If the user message is unclear, ask politely for clarification.
+- Do not output official room prices unless already handled by fixed business logic outside AI.
+- Be concise, professional, and hotel-style.
 `;
 
 app.get("/", (req, res) => {
   res.send("Royal Mawlamyine AI Webhook Running");
 });
 
+// Meta webhook verification
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -64,6 +79,7 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
+// Messenger events
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
@@ -113,49 +129,59 @@ async function handleMessageEvent(senderId, message) {
 
   const currentState = getUserState(senderId);
 
-  // booking step 1
+  // Booking Step 1 -> waiting booking details
   if (currentState.stage === "awaiting_booking_details") {
     updateUserState(senderId, {
       stage: "awaiting_contact_info",
       bookingDetails: text,
-      lastTopic: "booking"
+      lastTopic: "booking",
+      lastIntent: "booking"
     });
 
     await sendTextMessage(
       senderId,
       "ကျေးဇူးတင်ပါတယ်ရှင်/ခင်ဗျာ。\n\n" +
-      "လက်ခံရရှိသော Booking Details:\n" +
-      `${text}\n\n` +
-      "ကျေးဇူးပြု၍ အတည်ပြုဆက်သွယ်နိုင်ရန် အောက်ပါအချက်အလက်များ ပို့ပေးပါ:\n" +
-      "1. Full Name\n" +
-      "2. Contact Number\n\n" +
-      "ဥပမာ:\n" +
-      "Name - Mg Mg\n" +
-      "Phone - 09xxxxxxxxx"
+        "လက်ခံရရှိသော Booking Details:\n" +
+        `${text}\n\n` +
+        "ကျေးဇူးပြု၍ အတည်ပြုဆက်သွယ်နိုင်ရန် အောက်ပါအချက်အလက်များ ပို့ပေးပါ:\n" +
+        "1. Full Name\n" +
+        "2. Contact Number\n\n" +
+        "ဥပမာ:\n" +
+        "Name - Mg Mg\n" +
+        "Phone - 09xxxxxxxxx"
     );
     return;
   }
 
-  // booking step 2
+  // Booking Step 2 -> waiting contact info
   if (currentState.stage === "awaiting_contact_info") {
     updateUserState(senderId, {
       stage: "idle",
       contactInfo: text,
       bookingCompletedAt: new Date().toISOString(),
-      lastTopic: "booking"
+      lastTopic: "booking",
+      lastIntent: "booking"
+    });
+
+    const parsed = extractNameAndPhone(text);
+
+    await saveBookingToFirestore({
+      customerName: parsed.name,
+      contactNumber: parsed.phone,
+      bookingDetails: currentState.bookingDetails || ""
     });
 
     await sendTextMessage(
       senderId,
       "ကျေးဇူးတင်ပါတယ်ရှင်/ခင်ဗျာ。\n\n" +
-      "သင်၏ Booking Request ကို လက်ခံရရှိပါပြီ。\n" +
-      "Reservation Team မှ မကြာမီ ဆက်သွယ်အတည်ပြုပေးပါမည်。\n\n" +
-      urgentContactMessage()
+        "သင်၏ Booking Request ကို လက်ခံရရှိပါပြီ。\n" +
+        "Reservation Team မှ မကြာမီ ဆက်သွယ်အတည်ပြုပေးပါမည်。\n\n" +
+        urgentContactMessage()
     );
     return;
   }
 
-  // greeting
+  // Greeting
   if (isGreeting(normalized)) {
     updateUserState(senderId, {
       stage: "idle",
@@ -166,7 +192,7 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
-  // booking start
+  // Booking start
   if (isBookingIntent(normalized)) {
     updateUserState(senderId, {
       stage: "awaiting_booking_details",
@@ -177,7 +203,7 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
-  // contact
+  // Contact
   if (isContactIntent(normalized)) {
     updateUserState(senderId, {
       stage: "idle",
@@ -188,21 +214,18 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
-  // location
+  // Location
   if (isLocationIntent(normalized)) {
     updateUserState(senderId, {
       stage: "idle",
       lastTopic: "location",
       lastIntent: "location"
     });
-    await sendTextMessage(
-      senderId,
-      `${HOTEL.locationText}\n\n${urgentContactMessage()}`
-    );
+    await sendTextMessage(senderId, `${HOTEL.locationText}\n\n${urgentContactMessage()}`);
     return;
   }
 
-  // exact price / room
+  // Specific fixed price
   const specificPrice = getSpecificRoomPrice(normalized);
   if (specificPrice) {
     updateUserState(senderId, {
@@ -214,7 +237,7 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
-  // generic price or room list
+  // Generic room rates
   if (isPriceIntent(normalized) || isRoomIntent(normalized)) {
     updateUserState(senderId, {
       stage: "idle",
@@ -225,7 +248,7 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
-  // follow-up using last topic
+  // Follow-up context
   if (isFollowUpQuestion(normalized)) {
     const followUpReply = getFollowUpReply(currentState, normalized);
     if (followUpReply) {
@@ -234,13 +257,13 @@ async function handleMessageEvent(senderId, message) {
     }
   }
 
-  // unclear short message with no useful topic
+  // Unclear question
   if (isUnclearQuestion(normalized)) {
     await sendTextMessage(senderId, clarificationMessage());
     return;
   }
 
-  // AI for general questions only
+  // Gemini general reply
   const aiReply = await askGemini(text);
   updateUserState(senderId, {
     stage: "idle",
@@ -270,11 +293,13 @@ async function handlePostbackEvent(senderId, postback) {
 }
 
 function getUserState(senderId) {
-  return userStates.get(senderId) || {
-    stage: "idle",
-    lastTopic: null,
-    lastIntent: null
-  };
+  return (
+    userStates.get(senderId) || {
+      stage: "idle",
+      lastTopic: null,
+      lastIntent: null
+    }
+  );
 }
 
 function updateUserState(senderId, patch) {
@@ -313,10 +338,7 @@ function bookingStartMessage() {
 }
 
 function urgentContactMessage() {
-  return (
-    "Urgent Contact / Hot Line:\n" +
-    HOTEL.hotlines.join("\n")
-  );
+  return "Urgent Contact / Hot Line:\n" + HOTEL.hotlines.join("\n");
 }
 
 function clarificationMessage() {
@@ -336,75 +358,132 @@ function normalizeText(text) {
 }
 
 function isGreeting(text) {
-  const keywords = [
-    "hi", "hello", "hey", "mingalabar", "mingalarbar",
-    "မင်္ဂလာပါ", "ဟယ်လို"
-  ];
+  const keywords = ["hi", "hello", "hey", "mingalabar", "mingalarbar", "မင်္ဂလာပါ", "ဟယ်လို"];
   return keywords.some((k) => text.includes(k));
 }
 
 function isBookingIntent(text) {
   const keywords = [
-    "booking", "book", "reservation", "reserve",
-    "ဘိုကင်", "booking ယူမယ်", "booking လုပ်မယ်",
-    "အခန်းယူမယ်", "တည်းမယ်", "booking ပြုလုပ်"
+    "booking",
+    "book",
+    "reservation",
+    "reserve",
+    "ဘိုကင်",
+    "booking ယူမယ်",
+    "booking လုပ်မယ်",
+    "အခန်းယူမယ်",
+    "တည်းမယ်",
+    "booking ပြုလုပ်"
   ];
   return keywords.some((k) => text.includes(k));
 }
 
 function isPriceIntent(text) {
   const keywords = [
-    "price", "prices", "rate", "rates", "room rate", "room rates",
-    "cost", "how much", "charge", "fee",
-    "စျေး", "ဈေး", "စျေးနှုန်း", "ဈေးနှုန်း",
-    "ဘယ်လောက်", "တန်လဲ", "ကုန်ကျ", "ကျသင့်",
-    "တစ်ခန်းဘယ်လောက်", "အခန်းစျေး", "အခန်းခ", "တစ်ညဘယ်လောက်"
+    "price",
+    "prices",
+    "rate",
+    "rates",
+    "room rate",
+    "room rates",
+    "cost",
+    "how much",
+    "charge",
+    "fee",
+    "စျေး",
+    "ဈေး",
+    "စျေးနှုန်း",
+    "ဈေးနှုန်း",
+    "ဘယ်လောက်",
+    "တန်lဲ",
+    "ကုန်ကျ",
+    "ကျသင့်",
+    "တစ်ခန်းဘယ်လောက်",
+    "အခန်းစျေး",
+    "အခန်းခ",
+    "တစ်ညဘယ်လောက်"
   ];
   return keywords.some((k) => text.includes(k));
 }
 
 function isRoomIntent(text) {
   const keywords = [
-    "room", "rooms", "superior", "deluxe", "suite", "grand suite",
-    "double room", "triple room",
-    "အခန်း", "တစ်ခန်း", "စူပီးရီးယား", "စူပီးရီးရား",
-    "ဒီလက်စ်", "ဒီလပ်စ်", "ဧည့်ခန်းတွဲ",
-    "၂ ယောက်ခန်း", "၃ ယောက်ခန်း", "2 ယောက်ခန်း", "3 ယောက်ခန်း",
-    "2 guests", "3 guests"
+    "room",
+    "rooms",
+    "superior",
+    "deluxe",
+    "suite",
+    "grand suite",
+    "double room",
+    "triple room",
+    "အခန်း",
+    "တစ်ခန်း",
+    "စူပီးရီးယား",
+    "စူပီးရီးရား",
+    "ဒီလက်စ်",
+    "ဒီလပ်စ်",
+    "ဧည့်ခန်းတွဲ",
+    "၂ ယောက်ခန်း",
+    "၃ ယောက်ခန်း",
+    "2 ယောက်ခန်း",
+    "3 ယောက်ခန်း",
+    "2 guests",
+    "3 guests"
   ];
   return keywords.some((k) => text.includes(k));
 }
 
 function isLocationIntent(text) {
   const keywords = [
-    "location", "address", "map", "where",
-    "လိပ်စာ", "တည်နေရာ", "map link", "ဘယ်နား", "ဘယ်လိုလာ"
+    "location",
+    "address",
+    "map",
+    "where",
+    "လိပ်စာ",
+    "တည်နေရာ",
+    "map link",
+    "ဘယ်နား",
+    "ဘယ်လိုလာ"
   ];
   return keywords.some((k) => text.includes(k));
 }
 
 function isContactIntent(text) {
-  const keywords = [
-    "contact", "phone", "hotline", "call",
-    "ဖုန်း", "ဆက်သွယ်", "နံပါတ်", "hot line"
-  ];
+  const keywords = ["contact", "phone", "hotline", "call", "ဖုန်း", "ဆက်သွယ်", "နံပါတ်", "hot line"];
   return keywords.some((k) => text.includes(k));
 }
 
 function isFollowUpQuestion(text) {
   const keywords = [
-    "အခုရှိသေးလား", "ရှိသေးလား", "ရသေးလား", "ရလား",
-    "ဘယ်လောက်လဲ", "ဘယ်လိုလဲ", "အခုဘယ်လိုလဲ",
-    "အခုရှိလား", "လမ်းညွှန်ပေး", "ဘယ်လိုလာရမလဲ"
+    "အခုရှိသေးလား",
+    "ရှိသေးလား",
+    "ရသေးလား",
+    "ရလား",
+    "ဘယ်လောက်လဲ",
+    "ဘယ်လိုလဲ",
+    "အခုဘယ်လိုလဲ",
+    "အခုရှိလား",
+    "လမ်းညွှန်ပေး",
+    "ဘယ်လိုလာရမလဲ"
   ];
   return keywords.some((k) => text.includes(k));
 }
 
 function isUnclearQuestion(text) {
   const unclearKeywords = [
-    "ရှိလား", "ရှိသေးလား", "ဘယ်လောက်လဲ", "ရလား",
-    "အခုရှိလား", "အခုရလား", "သိချင်လို့",
-    "ဘာလဲ", "အဲ့ဒါ", "အဲဒါ", "ဒီဟာ", "အခု", "ရှိမလား"
+    "ရှိလား",
+    "ရှိသေးလား",
+    "ဘယ်လောက်လဲ",
+    "ရလား",
+    "အခုရှိလား",
+    "အခုရလား",
+    "သိချင်လို့",
+    "ဘာလဲ",
+    "အဲ့ဒါ",
+    "အဲဒါ",
+    "ဒီဟာ",
+    "အခု",
+    "ရှိမလား"
   ];
 
   const hasKnownIntent =
@@ -506,7 +585,6 @@ function getSpecificRoomPrice(text) {
 
 function getFollowUpReply(state, text) {
   const topic = state.lastTopic;
-
   if (!topic) return null;
 
   if (topic === "superior_double") {
@@ -585,6 +663,46 @@ function getFollowUpReply(state, text) {
   }
 
   return null;
+}
+
+function extractNameAndPhone(text) {
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  let name = text;
+  let phone = text;
+
+  for (const line of lines) {
+    const lower = line.toLowerCase();
+    if (lower.includes("name")) {
+      name = line.split("-").slice(1).join("-").trim() || line;
+    }
+    if (lower.includes("phone") || lower.includes("contact")) {
+      phone = line.split("-").slice(1).join("-").trim() || line;
+    }
+  }
+
+  const phoneMatch = text.match(/(\+?\d[\d\s~-]{6,})/);
+  if (phoneMatch) {
+    phone = phoneMatch[0].trim();
+  }
+
+  return { name, phone };
+}
+
+async function saveBookingToFirestore(payload) {
+  try {
+    await db.collection("bookings").add({
+      dateReceived: new Date().toISOString(),
+      customerName: payload.customerName || "",
+      contactNumber: payload.contactNumber || "",
+      bookingDetails: payload.bookingDetails || "",
+      status: "New",
+      source: "Messenger"
+    });
+
+    console.log("Booking saved to Firestore");
+  } catch (e) {
+    console.error("Firestore save error:", e?.message || e);
+  }
 }
 
 async function askGemini(userText) {
