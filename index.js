@@ -10,10 +10,9 @@ const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const PORT = process.env.PORT || 3000;
 
-const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 
-// Temporary demo state only
-// Later -> move booking data to Google Sheet / DB
+// temporary in-memory state
 const userStates = new Map();
 
 const HOTEL = {
@@ -33,46 +32,26 @@ const HOTEL = {
     "Children under 6 years - Free\n" +
     "Children age 6 to 12 years - 25000MMK",
   locationText:
-    "Royal Mawlamyine Hotel ၏ လိပ်စာနှင့် တည်နေရာအချက်အလက်ကို ပို့ပေးနိုင်ပါတယ်ရှင်/ခင်ဗျာ။\n" +
-    "မိတ်ဆွေ ဘယ်နေရာကနေ လာမလဲဆိုတာ ပြောပေးပါက ဘယ်လိုလာရမလဲဆိုသည့် လမ်းညွှန်အချက်အလက်ကိုလည်း ဆက်လက်ကူညီပေးနိုင်ပါသည်။",
+    "Royal Mawlamyine Hotel ၏ လိပ်စာနှင့် တည်နေရာအချက်အလက်ကို ပို့ပေးနိုင်ပါတယ်ရှင်/ခင်ဗျာ。\n" +
+    "မိတ်ဆွေ ဘယ်နေရာကနေ လာမလဲဆိုတာ ပြောပေးပါက ဘယ်လိုလာရမလဲဆိုသည့် လမ်းညွှန်အချက်အလက်ကိုလည်း ဆက်လက်ကူညီပေးနိုင်ပါသည်။"
 };
 
 const SYSTEM_PROMPT = `
 You are the polite assistant for Royal Mawlamyine Hotel.
 
-IMPORTANT RULES:
-- Treat every new user message as a new independent question.
-- Do NOT rely on previous question context unless the user clearly refers to the previous message.
-- If a message is unclear, do NOT guess. Ask for clarification politely in Burmese.
-- Do NOT carry over earlier topics into a new unrelated question.
+Rules:
 - Reply in polite Burmese by default.
 - Use short English only when useful.
-- Never invent prices, facilities, addresses, or hotel policies.
-- If the topic is official pricing, booking, hotline, child policy, extra bed, or room type, those should be handled by fixed business logic outside AI.
-- Your job is mainly for natural reply on general hotel inquiries that are not covered by fixed rules.
-
-If the user message is unclear, respond exactly like this:
-"လူကြီးမင်း၏ မေးခွန်းလေးကို တိတိကျကျ ထပ်မံမေးမြန်းပေးနိုင်မလားရှင်။"
-
-Known official facts:
-- Superior Double Room (2 Guests) - 130000MMK
-- Superior Triple Room (3 Guests) - 170000MMK
-- Deluxe Room - 200000MMK
-- Grand Suite - 300000MMK
-- Extra Bed (1 Person) - 40000MMK
-- Children under 6 years - Free
-- Children age 6 to 12 years - 25000MMK
-- Hotlines:
-  09-945002600
-  09-795679111~222
-  09-795679666
+- Never invent prices, hotel policies, facilities, or addresses.
+- If the message is unclear and there is no clear context, ask for clarification politely.
+- Do not output prices unless they are already handled by fixed business logic outside AI.
+- Be concise and professional.
 `;
 
 app.get("/", (req, res) => {
   res.send("Royal Mawlamyine AI Webhook Running");
 });
 
-// Meta verify
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -85,7 +64,6 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-// Messenger events
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
@@ -121,10 +99,7 @@ async function handleMessageEvent(senderId, message) {
   const normalized = normalizeText(text);
 
   if (!text && !message.attachments?.length) {
-    await sendTextMessage(
-      senderId,
-      "ကျေးဇူးပြု၍ စာသားဖြင့် မေးမြန်းပေးပါရှင်/ခင်ဗျာ။"
-    );
+    await sendTextMessage(senderId, "ကျေးဇူးပြု၍ စာသားဖြင့် မေးမြန်းပေးပါရှင်/ခင်ဗျာ။");
     return;
   }
 
@@ -136,14 +111,14 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
-  const currentState = userStates.get(senderId);
+  const currentState = getUserState(senderId);
 
-  // Booking flow step 1 -> waiting booking details
-  if (currentState?.stage === "awaiting_booking_details") {
-    userStates.set(senderId, {
-      ...currentState,
+  // booking step 1
+  if (currentState.stage === "awaiting_booking_details") {
+    updateUserState(senderId, {
       stage: "awaiting_contact_info",
-      bookingDetails: text
+      bookingDetails: text,
+      lastTopic: "booking"
     });
 
     await sendTextMessage(
@@ -161,13 +136,13 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
-  // Booking flow step 2 -> waiting name + phone
-  if (currentState?.stage === "awaiting_contact_info") {
-    userStates.set(senderId, {
-      ...currentState,
-      stage: "booking_completed",
+  // booking step 2
+  if (currentState.stage === "awaiting_contact_info") {
+    updateUserState(senderId, {
+      stage: "idle",
       contactInfo: text,
-      completedAt: new Date().toISOString()
+      bookingCompletedAt: new Date().toISOString(),
+      lastTopic: "booking"
     });
 
     await sendTextMessage(
@@ -177,43 +152,49 @@ async function handleMessageEvent(senderId, message) {
       "Reservation Team မှ မကြာမီ ဆက်သွယ်အတည်ပြုပေးပါမည်。\n\n" +
       urgentContactMessage()
     );
-
-    setTimeout(() => userStates.delete(senderId), 3000);
     return;
   }
 
-  // 1) Greeting
+  // greeting
   if (isGreeting(normalized)) {
+    updateUserState(senderId, {
+      stage: "idle",
+      lastTopic: "welcome",
+      lastIntent: "greeting"
+    });
     await sendTextMessage(senderId, welcomeMessage());
     return;
   }
 
-  // 2) Booking
+  // booking start
   if (isBookingIntent(normalized)) {
-    userStates.set(senderId, {
+    updateUserState(senderId, {
       stage: "awaiting_booking_details",
-      startedAt: new Date().toISOString()
+      lastTopic: "booking",
+      lastIntent: "booking"
     });
-
     await sendTextMessage(senderId, bookingStartMessage());
     return;
   }
 
-  // 3) Specific fixed price
-  const specificPrice = getSpecificRoomPrice(normalized);
-  if (specificPrice) {
-    await sendTextMessage(senderId, specificPrice);
+  // contact
+  if (isContactIntent(normalized)) {
+    updateUserState(senderId, {
+      stage: "idle",
+      lastTopic: "contact",
+      lastIntent: "contact"
+    });
+    await sendTextMessage(senderId, urgentContactMessage());
     return;
   }
 
-  // 4) Full room rates
-  if (isPriceIntent(normalized) || isRoomIntent(normalized)) {
-    await sendTextMessage(senderId, HOTEL.roomRatesText);
-    return;
-  }
-
-  // 5) Location / Address
+  // location
   if (isLocationIntent(normalized)) {
+    updateUserState(senderId, {
+      stage: "idle",
+      lastTopic: "location",
+      lastIntent: "location"
+    });
     await sendTextMessage(
       senderId,
       `${HOTEL.locationText}\n\n${urgentContactMessage()}`
@@ -221,20 +202,51 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
-  // 6) Contact
-  if (isContactIntent(normalized)) {
-    await sendTextMessage(senderId, urgentContactMessage());
+  // exact price / room
+  const specificPrice = getSpecificRoomPrice(normalized);
+  if (specificPrice) {
+    updateUserState(senderId, {
+      stage: "idle",
+      lastTopic: specificPrice.topic,
+      lastIntent: "price"
+    });
+    await sendTextMessage(senderId, specificPrice.reply);
     return;
   }
 
-  // 7) If user message is too short / unclear -> clarification
+  // generic price or room list
+  if (isPriceIntent(normalized) || isRoomIntent(normalized)) {
+    updateUserState(senderId, {
+      stage: "idle",
+      lastTopic: "room_rates",
+      lastIntent: "price"
+    });
+    await sendTextMessage(senderId, HOTEL.roomRatesText);
+    return;
+  }
+
+  // follow-up using last topic
+  if (isFollowUpQuestion(normalized)) {
+    const followUpReply = getFollowUpReply(currentState, normalized);
+    if (followUpReply) {
+      await sendTextMessage(senderId, followUpReply);
+      return;
+    }
+  }
+
+  // unclear short message with no useful topic
   if (isUnclearQuestion(normalized)) {
     await sendTextMessage(senderId, clarificationMessage());
     return;
   }
 
-  // 8) AI reply for general questions only
+  // AI for general questions only
   const aiReply = await askGemini(text);
+  updateUserState(senderId, {
+    stage: "idle",
+    lastTopic: "general_ai",
+    lastIntent: "general"
+  });
   await sendTextMessage(senderId, aiReply);
 }
 
@@ -242,6 +254,11 @@ async function handlePostbackEvent(senderId, postback) {
   const payload = postback.payload || "";
 
   if (payload === "GET_STARTED") {
+    updateUserState(senderId, {
+      stage: "idle",
+      lastTopic: "welcome",
+      lastIntent: "greeting"
+    });
     await sendTextMessage(senderId, welcomeMessage());
     return;
   }
@@ -250,6 +267,23 @@ async function handlePostbackEvent(senderId, postback) {
     senderId,
     "ကျေးဇူးပြု၍ လိုအပ်သော အချက်အလက်ကို စာသားဖြင့် မေးမြန်းနိုင်ပါသည်။"
   );
+}
+
+function getUserState(senderId) {
+  return userStates.get(senderId) || {
+    stage: "idle",
+    lastTopic: null,
+    lastIntent: null
+  };
+}
+
+function updateUserState(senderId, patch) {
+  const current = getUserState(senderId);
+  userStates.set(senderId, {
+    ...current,
+    ...patch,
+    updatedAt: Date.now()
+  });
 }
 
 function welcomeMessage() {
@@ -278,6 +312,13 @@ function bookingStartMessage() {
   );
 }
 
+function urgentContactMessage() {
+  return (
+    "Urgent Contact / Hot Line:\n" +
+    HOTEL.hotlines.join("\n")
+  );
+}
+
 function clarificationMessage() {
   return (
     "လူကြီးမင်း၏ မေးခွန်းလေးကို တိတိကျကျ ထပ်မံမေးမြန်းပေးနိုင်မလားရှင်。\n\n" +
@@ -287,13 +328,6 @@ function clarificationMessage() {
     "- Booking ပြုလုပ်လိုပါသည်\n" +
     "- Location / လိပ်စာ\n\n" +
     "ကျေးဇူးတင်ပါတယ်ရှင်။"
-  );
-}
-
-function urgentContactMessage() {
-  return (
-    "Urgent Contact / Hot Line:\n" +
-    HOTEL.hotlines.join("\n")
   );
 }
 
@@ -357,10 +391,19 @@ function isContactIntent(text) {
   return keywords.some((k) => text.includes(k));
 }
 
+function isFollowUpQuestion(text) {
+  const keywords = [
+    "အခုရှိသေးလား", "ရှိသေးလား", "ရသေးလား", "ရလား",
+    "ဘယ်လောက်လဲ", "ဘယ်လိုလဲ", "အခုဘယ်လိုလဲ",
+    "အခုရှိလား", "လမ်းညွှန်ပေး", "ဘယ်လိုလာရမလဲ"
+  ];
+  return keywords.some((k) => text.includes(k));
+}
+
 function isUnclearQuestion(text) {
   const unclearKeywords = [
     "ရှိလား", "ရှိသေးလား", "ဘယ်လောက်လဲ", "ရလား",
-    "အခုရှိလား", "အခုရလား", "သိချင်လို့", "စုံစမ်းချင်လို့",
+    "အခုရှိလား", "အခုရလား", "သိချင်လို့",
     "ဘာလဲ", "အဲ့ဒါ", "အဲဒါ", "ဒီဟာ", "အခု", "ရှိမလား"
   ];
 
@@ -390,7 +433,10 @@ function getSpecificRoomPrice(text) {
     t.includes("စူပီးရီးယား ၂") ||
     t.includes("စူပီးရီးရား ၂")
   ) {
-    return "Superior Double Room (2 Guests) - 130000MMK";
+    return {
+      topic: "superior_double",
+      reply: "Superior Double Room (2 Guests) - 130000MMK"
+    };
   }
 
   if (
@@ -403,15 +449,17 @@ function getSpecificRoomPrice(text) {
     t.includes("စူပီးရီးယား ၃") ||
     t.includes("စူပီးရီးရား ၃")
   ) {
-    return "Superior Triple Room (3 Guests) - 170000MMK";
+    return {
+      topic: "superior_triple",
+      reply: "Superior Triple Room (3 Guests) - 170000MMK"
+    };
   }
 
-  if (
-    t.includes("deluxe") ||
-    t.includes("ဒီလက်စ်") ||
-    t.includes("ဒီလပ်စ်")
-  ) {
-    return "Deluxe Room - 200000MMK";
+  if (t.includes("deluxe") || t.includes("ဒီလက်စ်") || t.includes("ဒီလပ်စ်")) {
+    return {
+      topic: "deluxe",
+      reply: "Deluxe Room - 200000MMK"
+    };
   }
 
   if (
@@ -420,7 +468,10 @@ function getSpecificRoomPrice(text) {
     t.includes("suite") ||
     t.includes("ဧည့်ခန်းတွဲ")
   ) {
-    return "Grand Suite - 300000MMK";
+    return {
+      topic: "grand_suite",
+      reply: "Grand Suite - 300000MMK"
+    };
   }
 
   if (
@@ -430,7 +481,10 @@ function getSpecificRoomPrice(text) {
     t.includes("တစ်ယောက်ထပ်") ||
     t.includes("၁ ယောက်ထပ်")
   ) {
-    return "Extra Bed (1 Person) - 40000MMK";
+    return {
+      topic: "extra_bed",
+      reply: "Extra Bed (1 Person) - 40000MMK"
+    };
   }
 
   if (
@@ -441,13 +495,103 @@ function getSpecificRoomPrice(text) {
     t.includes("၆ နှစ်") ||
     t.includes("၁၂ နှစ်")
   ) {
-    return "Children age 6 to 12 years - 25000MMK";
+    return {
+      topic: "child_policy",
+      reply: "Children age 6 to 12 years - 25000MMK"
+    };
+  }
+
+  return null;
+}
+
+function getFollowUpReply(state, text) {
+  const topic = state.lastTopic;
+
+  if (!topic) return null;
+
+  if (topic === "superior_double") {
+    if (text.includes("ရှိ")) {
+      return "Superior Double Room availability ကို စစ်ဆေးပေးရပါမယ်ရှင်/ခင်ဗျာ။ ကျေးဇူးပြု၍ Check-in Date လေး ပို့ပေးနိုင်မလားရှင်။";
+    }
+    if (text.includes("ဘယ်လောက်")) {
+      return "Superior Double Room (2 Guests) - 130000MMK";
+    }
+  }
+
+  if (topic === "superior_triple") {
+    if (text.includes("ရှိ")) {
+      return "Superior Triple Room availability ကို စစ်ဆေးပေးရပါမယ်ရှင်/ခင်ဗျာ။ ကျေးဇူးပြု၍ Check-in Date လေး ပို့ပေးနိုင်မလားရှင်။";
+    }
+    if (text.includes("ဘယ်လောက်")) {
+      return "Superior Triple Room (3 Guests) - 170000MMK";
+    }
+  }
+
+  if (topic === "deluxe") {
+    if (text.includes("ရှိ")) {
+      return "Deluxe Room availability ကို စစ်ဆေးပေးရပါမယ်ရှင်/ခင်ဗျာ။ ကျေးဇူးပြု၍ Check-in Date လေး ပို့ပေးနိုင်မလားရှင်။";
+    }
+    if (text.includes("ဘယ်လောက်")) {
+      return "Deluxe Room - 200000MMK";
+    }
+  }
+
+  if (topic === "grand_suite") {
+    if (text.includes("ရှိ")) {
+      return "Grand Suite availability ကို စစ်ဆေးပေးရပါမယ်ရှင်/ခင်ဗျာ။ ကျေးဇူးပြု၍ Check-in Date လေး ပို့ပေးနိုင်မလားရှင်။";
+    }
+    if (text.includes("ဘယ်လောက်")) {
+      return "Grand Suite - 300000MMK";
+    }
+  }
+
+  if (topic === "extra_bed") {
+    if (text.includes("ဘယ်လောက်")) {
+      return "Extra Bed (1 Person) - 40000MMK";
+    }
+    if (text.includes("ရှိ")) {
+      return "Extra Bed လိုအပ်ပါက စီစဉ်ပေးနိုင်ခြင်း ရှိ/မရှိကို Reservation Team မှ စစ်ဆေးအတည်ပြုပေးပါမည်ရှင်/ခင်ဗျာ။";
+    }
+  }
+
+  if (topic === "child_policy") {
+    if (text.includes("ဘယ်လောက်")) {
+      return "Children age 6 to 12 years - 25000MMK\nChildren under 6 years - Free";
+    }
+  }
+
+  if (topic === "location") {
+    if (text.includes("ဘယ်လိုလာ")) {
+      return "မိတ်ဆွေ ဘယ်နေရာကနေ လာမလဲဆိုတာ ပြောပေးပါက Royal Mawlamyine Hotel သို့ ဘယ်လိုလာရမလဲဆိုသည့် လမ်းညွှန်အချက်အလက်ကို ဆက်လက်ကူညီပေးနိုင်ပါသည်။";
+    }
+    if (text.includes("လိပ်စာ") || text.includes("map")) {
+      return HOTEL.locationText;
+    }
+  }
+
+  if (topic === "room_rates") {
+    if (text.includes("ဘယ်လောက်")) {
+      return HOTEL.roomRatesText;
+    }
+    if (text.includes("ရှိ")) {
+      return "ကျေးဇူးပြု၍ ဘယ် Room Type availability ကို မေးမြန်းလိုသည်ကို တိတိကျကျ ပို့ပေးနိုင်မလားရှင်။ ဥပမာ - Superior Double / Deluxe / Grand Suite";
+    }
+  }
+
+  if (topic === "booking") {
+    if (text.includes("ရှိ") || text.includes("ရ")) {
+      return "Booking availability ကို စစ်ဆေးပေးရပါမယ်ရှင်/ခင်ဗျာ။ ကျေးဇူးပြု၍ Check-in Date, Nights, Guests Count နှင့် Room Type ပို့ပေးနိုင်မလားရှင်။";
+    }
   }
 
   return null;
 }
 
 async function askGemini(userText) {
+  if (!ai) {
+    return clarificationMessage();
+  }
+
   try {
     const prompt = `
 ${SYSTEM_PROMPT}
@@ -462,12 +606,7 @@ ${userText}
     });
 
     const reply = (response.text || "").trim();
-
-    if (!reply) {
-      return clarificationMessage();
-    }
-
-    return reply;
+    return reply || clarificationMessage();
   } catch (error) {
     console.error("Gemini error:", error?.message || error);
     return clarificationMessage();
