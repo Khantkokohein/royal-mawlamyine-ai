@@ -13,6 +13,7 @@ const PORT = process.env.PORT || 3000;
 
 const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 
+// Firestore
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.cert({
@@ -25,6 +26,7 @@ if (!admin.apps.length) {
 
 const db = admin.firestore();
 
+// temporary memory
 const userStates = new Map();
 
 const HOTEL = {
@@ -44,8 +46,13 @@ const HOTEL = {
     "Children under 6 years - Free\n" +
     "Children age 6 to 12 years - 25000MMK",
   locationText:
-    "Royal Mawlamyine Hotel ၏ လိပ်စာနှင့် တည်နေရာအချက်အလက်ကို ပို့ပေးနိုင်ပါတယ်ရှင်/ခင်ဗျာ။\n" +
-    "မိတ်ဆွေ ဘယ်နေရာကနေ လာမလဲဆိုတာ ပြောပေးပါက ဘယ်လိုလာရမလဲဆိုသည့် လမ်းညွှန်အချက်အလက်ကိုလည်း ဆက်လက်ကူညီပေးနိုင်ပါသည်။"
+    "Royal Mawlamyine Hotel ၏ လိပ်စာမှာ\n\n" +
+    "No. 64, Corner of Pearl Street and Upper Main Road,\n" +
+    "MayanKone Quarter,\n" +
+    "Mawlamyine, Mon State, Myanmar\n\n" +
+    "ဖြစ်ပါသည်ရှင်/ခင်ဗျာ。\n\n" +
+    "မိတ်ဆွေ ဘယ်နေရာကနေ လာမလဲဆိုတာ ပြောပေးပါက ဘယ်လိုလာရမလဲဆိုသော လမ်းညွှန်အချက်အလက်ကိုလည်း ဆက်လက်ကူညီပေးနိုင်ပါသည်。",
+  mapLink: "https://maps.app.goo.gl/56seMwe32mwc1cru9"
 };
 
 const SYSTEM_PROMPT = `
@@ -54,9 +61,9 @@ You are the polite assistant for Royal Mawlamyine Hotel.
 Rules:
 - Reply in polite Burmese by default.
 - Use short English only when useful.
-- Never invent prices, hotel policies, facilities, or addresses.
+- Never invent prices, policies, facilities, or address details.
 - If the message is unclear, ask politely for clarification.
-- For official prices and booking flow, business logic outside AI is the source of truth.
+- Official prices, booking steps, contact info, and location are handled by fixed business logic outside AI.
 - Keep replies concise, professional, and hotel-style.
 `;
 
@@ -64,6 +71,7 @@ app.get("/", (req, res) => {
   res.send("Royal Mawlamyine AI Webhook Running");
 });
 
+// Meta verify
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -76,6 +84,7 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
+// Messenger webhook
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
@@ -125,6 +134,10 @@ async function handleMessageEvent(senderId, message) {
 
   const state = getUserState(senderId);
 
+  // =========================
+  // STEP-BY-STEP BOOKING FLOW
+  // =========================
+
   if (state.stage === "awaiting_checkin") {
     updateUserState(senderId, {
       stage: "awaiting_nights",
@@ -139,7 +152,7 @@ async function handleMessageEvent(senderId, message) {
     await sendTextMessage(
       senderId,
       "ကျေးဇူးတင်ပါတယ်ရှင်/ခင်ဗျာ。\n\n" +
-      "ဘယ်နှညတည်းခိုမှာလဲရှင်။\n" +
+      "ဘယ်နှညတည်းခိုမှာလဲရှင်。\n" +
       "ဥပမာ - 2 Nights"
     );
     return;
@@ -188,20 +201,17 @@ async function handleMessageEvent(senderId, message) {
   }
 
   if (state.stage === "awaiting_room_type") {
-    updateUserState(senderId, {
-      stage: "awaiting_contact_info",
-      bookingDraft: {
-        ...state.bookingDraft,
-        roomType: text
-      },
-      lastTopic: "booking",
-      lastIntent: "booking"
-    });
-
     const bookingDraft = {
       ...state.bookingDraft,
       roomType: text
     };
+
+    updateUserState(senderId, {
+      stage: "awaiting_contact_info",
+      bookingDraft,
+      lastTopic: "booking",
+      lastIntent: "booking"
+    });
 
     await sendTextMessage(
       senderId,
@@ -223,7 +233,6 @@ async function handleMessageEvent(senderId, message) {
 
   if (state.stage === "awaiting_contact_info") {
     const parsed = extractNameAndPhone(text);
-
     const bookingDraft = state.bookingDraft || {};
 
     await saveBookingToFirestore({
@@ -259,6 +268,10 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
+  // ===========
+  // FIXED LOGIC
+  // ===========
+
   if (isGreeting(normalized)) {
     updateUserState(senderId, {
       stage: "idle",
@@ -280,7 +293,7 @@ async function handleMessageEvent(senderId, message) {
     await sendTextMessage(
       senderId,
       "Booking ပြုလုပ်ပေးနိုင်ပါတယ်ရှင်/ခင်ဗျာ。\n\n" +
-      "ကျေးဇူးပြု၍ Check-in Date လေး ပို့ပေးပါရှင်။\n" +
+      "ကျေးဇူးပြု၍ Check-in Date လေး ပို့ပေးပါရှင်。\n" +
       "ဥပမာ - 25 Apr 2026"
     );
     return;
@@ -296,13 +309,33 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
-  if (isLocationIntent(normalized)) {
+  if (normalized === "လိပ်စာ" || isLocationIntent(normalized)) {
     updateUserState(senderId, {
       stage: "idle",
       lastTopic: "location",
       lastIntent: "location"
     });
-    await sendTextMessage(senderId, `${HOTEL.locationText}\n\n${urgentContactMessage()}`);
+    await sendTextMessage(
+      senderId,
+      `${HOTEL.locationText}\n\nGoogle Maps:\n${HOTEL.mapLink}\n\n${urgentContactMessage()}`
+    );
+    return;
+  }
+
+  if (
+    normalized.includes("မေးမြန်း") ||
+    normalized.includes("စုံစမ်း") ||
+    normalized.includes("သိချင်")
+  ) {
+    await sendTextMessage(
+      senderId,
+      "ကျေးဇူးပြု၍ မေးမြန်းလိုသော အကြောင်းအရာကို တိတိကျကျ ရေးပေးနိုင်မလားရှင်。\n\n" +
+      "ဥပမာ:\n" +
+      "- Room Rates\n" +
+      "- Booking\n" +
+      "- Location / လိပ်စာ\n" +
+      "- Contact Information"
+    );
     return;
   }
 
@@ -317,7 +350,7 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
-  if (isPriceIntent(normalized) || isRoomIntent(normalized)) {
+  if (isPriceIntent(normalized)) {
     updateUserState(senderId, {
       stage: "idle",
       lastTopic: "room_rates",
@@ -327,6 +360,10 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
+  // =================
+  // FOLLOW-UP CONTEXT
+  // =================
+
   if (isFollowUpQuestion(normalized)) {
     const followUpReply = getFollowUpReply(state, normalized);
     if (followUpReply) {
@@ -335,10 +372,18 @@ async function handleMessageEvent(senderId, message) {
     }
   }
 
+  // ============
+  // UNCLEAR TEXT
+  // ============
+
   if (isUnclearQuestion(normalized)) {
     await sendTextMessage(senderId, clarificationMessage());
     return;
   }
+
+  // ==========
+  // GEMINI AI
+  // ==========
 
   const aiReply = await askGemini(text);
   updateUserState(senderId, {
@@ -466,33 +511,6 @@ function isPriceIntent(text) {
   return keywords.some((k) => text.includes(k));
 }
 
-function isRoomIntent(text) {
-  const keywords = [
-    "room",
-    "rooms",
-    "superior",
-    "deluxe",
-    "suite",
-    "grand suite",
-    "double room",
-    "triple room",
-    "အခန်း",
-    "တစ်ခန်း",
-    "စူပီးရီးယား",
-    "စူပီးရီးရား",
-    "ဒီလက်စ်",
-    "ဒီလပ်စ်",
-    "ဧည့်ခန်းတွဲ",
-    "၂ ယောက်ခန်း",
-    "၃ ယောက်ခန်း",
-    "2 ယောက်ခန်း",
-    "3 ယောက်ခန်း",
-    "2 guests",
-    "3 guests"
-  ];
-  return keywords.some((k) => text.includes(k));
-}
-
 function isLocationIntent(text) {
   const keywords = [
     "location",
@@ -524,7 +542,10 @@ function isFollowUpQuestion(text) {
     "အခုဘယ်လိုလဲ",
     "အခုရှိလား",
     "လမ်းညွှန်ပေး",
-    "ဘယ်လိုလာရမလဲ"
+    "ဘယ်လိုလာရမလဲ",
+    "ရန်ကုန်ကလာမယ်",
+    "bus နဲ့လာမယ်",
+    "ကားနဲ့လာမယ်"
   ];
   return keywords.some((k) => text.includes(k));
 }
@@ -550,7 +571,6 @@ function isUnclearQuestion(text) {
     isGreeting(text) ||
     isBookingIntent(text) ||
     isPriceIntent(text) ||
-    isRoomIntent(text) ||
     isLocationIntent(text) ||
     isContactIntent(text);
 
@@ -699,11 +719,38 @@ function getFollowUpReply(state, text) {
   }
 
   if (topic === "location") {
-    if (text.includes("ဘယ်လိုလာ")) {
-      return "မိတ်ဆွေ ဘယ်နေရာကနေ လာမလဲဆိုတာ ပြောပေးပါက Royal Mawlamyine Hotel သို့ ဘယ်လိုလာရမလဲဆိုသည့် လမ်းညွှန်အချက်အလက်ကို ဆက်လက်ကူညီပေးနိုင်ပါသည်။";
+    if (text.includes("ရန်ကုန်")) {
+      return (
+        "ရန်ကုန်မှ လာမည်ဆိုပါက လမ်းညွှန်ပေးနိုင်ပါတယ်ရှင်/ခင်ဗျာ。\n\n" +
+        "🚌 Bus ဖြင့်လာပါက:\n" +
+        "မော်လမြိုင် Bus Gate ရောက်ပါက အငှားယာဉ်အား\n" +
+        "'Royal Mawlamyine Hotel, No.64 Pearl Street and Upper Main Road Corner, MayanKone Quarter သို့ ပို့ပေးပါ' ဟု ပြောနိုင်ပါသည်。\n\n" +
+        "🚗 ကိုယ်ပိုင်ကားဖြင့်လာပါက:\n" +
+        "Google Maps ဖြင့် တိုက်ရိုက်လမ်းညွှန်ယူနိုင်ပါသည်:\n" +
+        HOTEL.mapLink
+      );
     }
+
+    if (text.includes("bus")) {
+      return (
+        "မော်လမြိုင် Bus Gate ရောက်ပါက အငှားယာဉ်အား\n" +
+        "'Royal Mawlamyine Hotel, No.64 Pearl Street and Upper Main Road Corner, MayanKone Quarter သို့ ပို့ပေးပါ' ဟု ပြောနိုင်ပါသည်။"
+      );
+    }
+
+    if (text.includes("ကား") || text.includes("car")) {
+      return (
+        "ကိုယ်ပိုင်ကားဖြင့်လာပါက အောက်ပါ Google Maps link ဖြင့် တိုက်ရိုက် လမ်းညွှန်ယူနိုင်ပါသည်:\n" +
+        HOTEL.mapLink
+      );
+    }
+
+    if (text.includes("ဘယ်လိုလာ")) {
+      return "မိတ်ဆွေ ဘယ်နေရာကနေ လာမလဲဆိုတာ ပြောပေးပါက လမ်းညွှန်ကူညီပေးနိုင်ပါသည်။ ဥပမာ - ရန်ကုန်ကလာမယ်";
+    }
+
     if (text.includes("လိပ်စာ") || text.includes("map")) {
-      return HOTEL.locationText;
+      return `${HOTEL.locationText}\n\nGoogle Maps:\n${HOTEL.mapLink}`;
     }
   }
 
