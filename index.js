@@ -13,7 +13,6 @@ const PORT = process.env.PORT || 3000;
 
 const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 
-// Firebase Admin / Firestore
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.cert({
@@ -26,7 +25,6 @@ if (!admin.apps.length) {
 
 const db = admin.firestore();
 
-// temporary in-memory user state
 const userStates = new Map();
 
 const HOTEL = {
@@ -46,8 +44,8 @@ const HOTEL = {
     "Children under 6 years - Free\n" +
     "Children age 6 to 12 years - 25000MMK",
   locationText:
-    "Royal Mawlamyine Hotel ၏ လိပ်စာနှင့် တည်နေရာအချက်အလက်ကို ပို့ပေးနိုင်ပါတယ်ရှင်/ခင်ဗျာ。\n" +
-    "မိတ်ဆွေ ဘယ်နေရာကနေ လာမလဲဆိုတာ ပြောပေးပါက ဘယ်လိုလာရမလဲဆိုသည့် လမ်းညွှန်အချက်အလက်ကိုလည်း ဆက်လက်ကူညီပေးနိုင်ပါသည်。"
+    "Royal Mawlamyine Hotel ၏ လိပ်စာနှင့် တည်နေရာအချက်အလက်ကို ပို့ပေးနိုင်ပါတယ်ရှင်/ခင်ဗျာ။\n" +
+    "မိတ်ဆွေ ဘယ်နေရာကနေ လာမလဲဆိုတာ ပြောပေးပါက ဘယ်လိုလာရမလဲဆိုသည့် လမ်းညွှန်အချက်အလက်ကိုလည်း ဆက်လက်ကူညီပေးနိုင်ပါသည်။"
 };
 
 const SYSTEM_PROMPT = `
@@ -56,17 +54,16 @@ You are the polite assistant for Royal Mawlamyine Hotel.
 Rules:
 - Reply in polite Burmese by default.
 - Use short English only when useful.
-- Never invent prices, policies, facilities, or address details.
-- If the user message is unclear, ask politely for clarification.
-- Do not output official room prices unless already handled by fixed business logic outside AI.
-- Be concise, professional, and hotel-style.
+- Never invent prices, hotel policies, facilities, or addresses.
+- If the message is unclear, ask politely for clarification.
+- For official prices and booking flow, business logic outside AI is the source of truth.
+- Keep replies concise, professional, and hotel-style.
 `;
 
 app.get("/", (req, res) => {
   res.send("Royal Mawlamyine AI Webhook Running");
 });
 
-// Meta webhook verification
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -79,7 +76,6 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-// Messenger events
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
@@ -127,13 +123,15 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
-  const currentState = getUserState(senderId);
+  const state = getUserState(senderId);
 
-  // Booking Step 1 -> waiting booking details
-  if (currentState.stage === "awaiting_booking_details") {
+  if (state.stage === "awaiting_checkin") {
     updateUserState(senderId, {
-      stage: "awaiting_contact_info",
-      bookingDetails: text,
+      stage: "awaiting_nights",
+      bookingDraft: {
+        ...state.bookingDraft,
+        checkInDate: text
+      },
       lastTopic: "booking",
       lastIntent: "booking"
     });
@@ -141,47 +139,126 @@ async function handleMessageEvent(senderId, message) {
     await sendTextMessage(
       senderId,
       "ကျေးဇူးတင်ပါတယ်ရှင်/ခင်ဗျာ。\n\n" +
-        "လက်ခံရရှိသော Booking Details:\n" +
-        `${text}\n\n` +
-        "ကျေးဇူးပြု၍ အတည်ပြုဆက်သွယ်နိုင်ရန် အောက်ပါအချက်အလက်များ ပို့ပေးပါ:\n" +
-        "1. Full Name\n" +
-        "2. Contact Number\n\n" +
-        "ဥပမာ:\n" +
-        "Name - Mg Mg\n" +
-        "Phone - 09xxxxxxxxx"
+      "ဘယ်နှညတည်းခိုမှာလဲရှင်။\n" +
+      "ဥပမာ - 2 Nights"
     );
     return;
   }
 
-  // Booking Step 2 -> waiting contact info
-  if (currentState.stage === "awaiting_contact_info") {
+  if (state.stage === "awaiting_nights") {
     updateUserState(senderId, {
-      stage: "idle",
-      contactInfo: text,
-      bookingCompletedAt: new Date().toISOString(),
+      stage: "awaiting_guests",
+      bookingDraft: {
+        ...state.bookingDraft,
+        nights: text
+      },
       lastTopic: "booking",
       lastIntent: "booking"
     });
 
+    await sendTextMessage(
+      senderId,
+      "Guest အရေအတွက် ဘယ်လောက်ပါလဲရှင်/ခင်ဗျာ。\n" +
+      "ဥပမာ - 2 Adults / 2 Adults 1 Child"
+    );
+    return;
+  }
+
+  if (state.stage === "awaiting_guests") {
+    updateUserState(senderId, {
+      stage: "awaiting_room_type",
+      bookingDraft: {
+        ...state.bookingDraft,
+        guests: text
+      },
+      lastTopic: "booking",
+      lastIntent: "booking"
+    });
+
+    await sendTextMessage(
+      senderId,
+      "လိုချင်သော Room Type ကို ပို့ပေးပါရှင်/ခင်ဗျာ。\n\n" +
+      "ဥပမာ:\n" +
+      "- Superior Double\n" +
+      "- Superior Triple\n" +
+      "- Deluxe\n" +
+      "- Grand Suite"
+    );
+    return;
+  }
+
+  if (state.stage === "awaiting_room_type") {
+    updateUserState(senderId, {
+      stage: "awaiting_contact_info",
+      bookingDraft: {
+        ...state.bookingDraft,
+        roomType: text
+      },
+      lastTopic: "booking",
+      lastIntent: "booking"
+    });
+
+    const bookingDraft = {
+      ...state.bookingDraft,
+      roomType: text
+    };
+
+    await sendTextMessage(
+      senderId,
+      "ကျေးဇူးတင်ပါတယ်ရှင်/ခင်ဗျာ。\n\n" +
+      "လက်ခံရရှိသော Booking Request:\n" +
+      `Check-in - ${bookingDraft.checkInDate || "-"}\n` +
+      `Nights - ${bookingDraft.nights || "-"}\n` +
+      `Guests - ${bookingDraft.guests || "-"}\n` +
+      `Room Type - ${bookingDraft.roomType || "-"}\n\n` +
+      "ကျေးဇူးပြု၍ အတည်ပြုဆက်သွယ်နိုင်ရန် အောက်ပါအချက်အလက်များ ပို့ပေးပါ:\n" +
+      "1. Full Name\n" +
+      "2. Contact Number\n\n" +
+      "ဥပမာ:\n" +
+      "Name - Mg Mg\n" +
+      "Phone - 09xxxxxxxxx"
+    );
+    return;
+  }
+
+  if (state.stage === "awaiting_contact_info") {
     const parsed = extractNameAndPhone(text);
+
+    const bookingDraft = state.bookingDraft || {};
 
     await saveBookingToFirestore({
       customerName: parsed.name,
       contactNumber: parsed.phone,
-      bookingDetails: currentState.bookingDetails || ""
+      bookingDetails:
+        `Check-in - ${bookingDraft.checkInDate || ""}\n` +
+        `Nights - ${bookingDraft.nights || ""}\n` +
+        `Guests - ${bookingDraft.guests || ""}\n` +
+        `Room Type - ${bookingDraft.roomType || ""}`,
+      checkInDate: bookingDraft.checkInDate || "",
+      nights: bookingDraft.nights || "",
+      guests: bookingDraft.guests || "",
+      roomType: bookingDraft.roomType || ""
+    });
+
+    updateUserState(senderId, {
+      stage: "idle",
+      bookingDraft: {},
+      contactInfo: text,
+      lastTopic: "booking",
+      lastIntent: "booking",
+      bookingCompletedAt: new Date().toISOString()
     });
 
     await sendTextMessage(
       senderId,
       "ကျေးဇူးတင်ပါတယ်ရှင်/ခင်ဗျာ。\n\n" +
-        "သင်၏ Booking Request ကို လက်ခံရရှိပါပြီ。\n" +
-        "Reservation Team မှ မကြာမီ ဆက်သွယ်အတည်ပြုပေးပါမည်。\n\n" +
-        urgentContactMessage()
+      "သင်၏ Booking Request ကို လက်ခံရရှိပါပြီ。\n" +
+      "Reservation Team မှ မကြာမီ ဆက်သွယ်အတည်ပြုပေးပါမည်。\n\n" +
+      urgentContactMessage()
     );
     return;
   }
 
-  // Greeting
   if (isGreeting(normalized)) {
     updateUserState(senderId, {
       stage: "idle",
@@ -192,18 +269,23 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
-  // Booking start
   if (isBookingIntent(normalized)) {
     updateUserState(senderId, {
-      stage: "awaiting_booking_details",
+      stage: "awaiting_checkin",
+      bookingDraft: {},
       lastTopic: "booking",
       lastIntent: "booking"
     });
-    await sendTextMessage(senderId, bookingStartMessage());
+
+    await sendTextMessage(
+      senderId,
+      "Booking ပြုလုပ်ပေးနိုင်ပါတယ်ရှင်/ခင်ဗျာ。\n\n" +
+      "ကျေးဇူးပြု၍ Check-in Date လေး ပို့ပေးပါရှင်။\n" +
+      "ဥပမာ - 25 Apr 2026"
+    );
     return;
   }
 
-  // Contact
   if (isContactIntent(normalized)) {
     updateUserState(senderId, {
       stage: "idle",
@@ -214,7 +296,6 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
-  // Location
   if (isLocationIntent(normalized)) {
     updateUserState(senderId, {
       stage: "idle",
@@ -225,7 +306,6 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
-  // Specific fixed price
   const specificPrice = getSpecificRoomPrice(normalized);
   if (specificPrice) {
     updateUserState(senderId, {
@@ -237,7 +317,6 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
-  // Generic room rates
   if (isPriceIntent(normalized) || isRoomIntent(normalized)) {
     updateUserState(senderId, {
       stage: "idle",
@@ -248,22 +327,19 @@ async function handleMessageEvent(senderId, message) {
     return;
   }
 
-  // Follow-up context
   if (isFollowUpQuestion(normalized)) {
-    const followUpReply = getFollowUpReply(currentState, normalized);
+    const followUpReply = getFollowUpReply(state, normalized);
     if (followUpReply) {
       await sendTextMessage(senderId, followUpReply);
       return;
     }
   }
 
-  // Unclear question
   if (isUnclearQuestion(normalized)) {
     await sendTextMessage(senderId, clarificationMessage());
     return;
   }
 
-  // Gemini general reply
   const aiReply = await askGemini(text);
   updateUserState(senderId, {
     stage: "idle",
@@ -297,7 +373,8 @@ function getUserState(senderId) {
     userStates.get(senderId) || {
       stage: "idle",
       lastTopic: null,
-      lastIntent: null
+      lastIntent: null,
+      bookingDraft: {}
     }
   );
 }
@@ -318,22 +395,6 @@ function welcomeMessage() {
     "Room Rates, Booking, Location / Address နှင့် Contact Information များကို ဤ Chat Box မှ မေးမြန်းနိုင်ပါသည်。\n\n" +
     "Booking ပြုလုပ်လိုပါက “Booking” ဟု ရိုက်ပို့နိုင်ပါသည်。\n\n" +
     urgentContactMessage()
-  );
-}
-
-function bookingStartMessage() {
-  return (
-    "Booking ပြုလုပ်ပေးနိုင်ပါတယ်ရှင်/ခင်ဗျာ。\n\n" +
-    "ကျေးဇူးပြု၍ အောက်ပါအချက်အလက်များ ပို့ပေးပါ:\n" +
-    "1. Check-in Date\n" +
-    "2. Number of Nights\n" +
-    "3. Guests Count (Adults / Children)\n" +
-    "4. Room Type\n\n" +
-    "ဥပမာ:\n" +
-    "Check-in - 25 Apr 2026\n" +
-    "Nights - 2\n" +
-    "Guests - 2 Adults\n" +
-    "Room Type - Superior Double"
   );
 }
 
@@ -395,7 +456,6 @@ function isPriceIntent(text) {
     "စျေးနှုန်း",
     "ဈေးနှုန်း",
     "ဘယ်လောက်",
-    "တန်lဲ",
     "ကုန်ကျ",
     "ကျသင့်",
     "တစ်ခန်းဘယ်လောက်",
@@ -667,6 +727,7 @@ function getFollowUpReply(state, text) {
 
 function extractNameAndPhone(text) {
   const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+
   let name = text;
   let phone = text;
 
@@ -680,7 +741,7 @@ function extractNameAndPhone(text) {
     }
   }
 
-  const phoneMatch = text.match(/(\+?\d[\d\s~-]{6,})/);
+  const phoneMatch = text.match(/(\+?\d[\d\s~\-]{6,})/);
   if (phoneMatch) {
     phone = phoneMatch[0].trim();
   }
@@ -695,6 +756,10 @@ async function saveBookingToFirestore(payload) {
       customerName: payload.customerName || "",
       contactNumber: payload.contactNumber || "",
       bookingDetails: payload.bookingDetails || "",
+      checkInDate: payload.checkInDate || "",
+      nights: payload.nights || "",
+      guests: payload.guests || "",
+      roomType: payload.roomType || "",
       status: "New",
       source: "Messenger"
     });
